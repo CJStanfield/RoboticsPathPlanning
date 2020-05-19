@@ -1,0 +1,246 @@
+% ProjectControlLoopPart1 class template for your path and motion planning
+% algorithm
+%
+% Create a "controller" class capable of creating a sequence of waypoints
+% to reach the goal and a motion controller to follow the path without
+% counting on a global localization system.
+%
+% Note that:
+%   1. Before the robot is confidently localized on the map, you will have
+%      to travel around. You could use a follow the wall algorithm, or
+%      travel at random directions like a vacuum cleaner robot.
+%   2. when the robot collides with the environment in the simulator, it  
+%      just stops. Use the range finder to check and avoid collisions.
+%
+% Right now the class sets the goal as the only waypoint and uses a  
+% circular motion to drive the robot to the goal without checking for 
+% obstacles.
+%
+% Existing properties (you are free to add/remove properties)
+%       goal : 2D column vector with the goal coordinates
+%       motionControl : in case you would like to use an existing Matlab 
+%           controller like robotics.PurePursuit for differential drive
+%           robots
+%       mcl : the Monte-Carlo localization algorithm
+%       OdometryModel : you may want to store here an odometry object which
+%           uses DiffDriveModelEulerSimulator
+%
+% Constructor (Do not modify)
+%		obj = ProjectControlLoopPartI(map,goal,robot,start,startCov);
+%
+% Inputs:
+%       map - a robotics.BinaryOccupancyGrid object
+%       goal - 2D column vector with the goal coordinates
+%       robot - a DiffDriveRobotSimulator object in case you would like to
+%               access robot characteristics, e.g., maximum linear or
+%               angular velocity, etc
+%       start - the expected initial position for the robot. 
+%       startCov - the covariance matrix for the initial position estimate.
+%               It must be set to an empty array if the initial position 
+%               is not known, i.e., the robot could be anywhere.
+%
+% Existing methods
+%
+%		compute : Given a pose of the robot, it returns the forward 
+%           and angular velocities. Usage:
+%				[v_f, omega, estPose, covPose] = obj.compute(ranges,angles);
+%			Inputs:
+%               ranges - the measurements of a range measurement sesnor,
+%                   e.g. lidar, kinect, etc. If the no obstacle is detected
+%                   within the measurement range, then the value for the
+%                   specific beam is NaN. You can use the function isnan to
+%                   detect such measurements in the range finder.
+%				angles - the angle which corresponds to each range 
+%					measurement
+%			Outputs:
+%     		    v_f - forward velocity
+%			    omega - angular velocity
+%
+% You are allowed to add new methods, but the interface of the compute
+% method must not be changed.
+% 
+% See also: robotics.PurePursuit, robotics.PRM, robotics.ParticleFilter,
+% robotics.MonteCarloLocalization, robotics.LikelihoodFieldSensorModel
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Cole Stanfield 1208803696
+% Points will be subtracted for programming style if no name & ID
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+classdef ProjectControlLoopPart2 < handle
+    
+    properties
+        motionControl = [];
+        goal = [];
+        DriveModel = [];
+        OdometryModel = [];
+        mcl = [];
+        prm = [];
+        path = [];
+        currentNode = 2;
+        previousNode = 1;
+        previousPoses = [];
+        localizedCount = 1;
+        robot = [];
+    end
+
+    methods
+        
+        function obj = ProjectControlLoopPart2(map,goal,robot,start,startCov)
+            
+            % some basic sanity checks
+            assert(isa(map,'robotics.BinaryOccupancyGrid'), ' map must be a robotics.BinaryOccupancyGrid object')
+            assert(isa(robot,'DiffDriveRobotSimulator'), ' robot must be a DiffDriveRobotSimulator object')
+            assert(size(goal,1)==1 && size(goal,2)==2, ' goal is not a 2D column vector')
+            assert(size(start,1)==1 && size(start,2)==3, ' start is not a 3D column vector')
+            assert(isempty(startCov) || (size(startCov,1)==3 && size(startCov,2)==3 && issymmetric(startCov)), ' startCov does not appear to be a covariance matrix')
+
+            obj.goal = goal;
+            obj.previousPoses = start;
+            
+            %Create a PRM
+            obj.prm = robotics.PRM(map, 50);
+            startLocation = robot.Robot.Pose(1:2);
+            obj.path = findpath(obj.prm, startLocation, obj.goal);
+            
+            %Create the Odometry Model
+            obj.DriveModel = DiffDriveModelEulerSimulator;
+            obj.DriveModel.setRobotPose(start);
+            obj.DriveModel.setStepSize(0.1);
+            
+            %Create the Odometry Model
+            obj.OdometryModel = robotics.OdometryMotionModel;
+            % obj.OdometryModel.Noise = [0.5 1.1 0.5 1.1];
+            obj.OdometryModel.Noise = [0.5 1.1 0.7 1.5];
+            
+            %Create a monte carlo localization system
+            obj.mcl = robotics.MonteCarloLocalization;
+            obj.mcl.InitialPose = start;
+            obj.mcl.InitialCovariance = startCov;
+            obj.mcl.MotionModel = obj.OdometryModel;
+            
+            %Create sensor model and add the map
+            sm = robotics.LikelihoodFieldSensorModel;
+            sm.Map = map;
+            obj.mcl.SensorModel = sm;
+            
+            obj.robot = robot;
+           % show(obj.prm)   
+            
+        end
+        
+        function [v_f, omega, estPose, covPose] = compute(obj,ranges,angles)
+            % Use the Current Pose to help calculate the noise values. 
+            currentPose = obj.robot.Robot.Pose;
+            
+            %update the previous poses
+            obj.previousPoses = [obj.previousPoses; currentPose];
+            obj.mcl.MotionModel(obj.previousPoses, currentPose);
+            
+            %Get an estimate of the robots position
+            
+            %Suppressed warning because isUpdated is not used
+            [isUpdated,estPose,covPose] = obj.mcl(currentPose,ranges,angles); %#ok<ASGLU>
+            % Compensating for error that I noticed. 
+            estPose(1) = estPose(1) + 0.3;
+            estPose(2) = estPose(2) - 0.2;
+            
+            % Compute the diffPose to help generate the noise values
+            diffPose = currentPose - estPose;            
+            
+            % The bot initially drives straight to localize itself. Once
+            % the CheckRanges function triggers, I assume the robot is
+            % localized
+            if(obj.localizedCount > 1)
+                [v_f, omega] = driveToGoal(obj, estPose, ranges);
+                if(obj.currentNode == length(obj.path))
+                    estPose = estPose + diffPose;
+                    [v_f, omega] = driveToGoal(obj, estPose, ranges);
+                end
+                obj.DriveModel.drive(v_f, omega);
+            else
+                [v_f, omega] = localizeBot(obj, ranges);
+                obj.DriveModel.drive(v_f, omega);
+            end
+           
+            
+        end
+        
+        function [v_f, omega] = localizeBot(obj, ranges)
+            for i = 1:length(ranges)
+                if(ranges(i) < 0.3)
+                    v_f = 0.05;
+                    if(i > 13)
+                        omega = -0.8;
+                    elseif(i < 8)
+                        omega = 0.8;
+                    else
+                        omega = pi/2;
+                    end
+                    obj.localizedCount = obj.localizedCount + 1;
+                    return
+                end
+            end
+            v_f = 0.3;
+            omega = 0;
+        end
+        
+        %Function used to determine v_f and omega. Assumes that the robot
+        %is already localized. Determines safe speed and angle for bot to
+        %move at.
+        function [v_f, omega] = driveToGoal(obj, estPose, ranges)
+            differenceCurrent = norm(obj.path(obj.currentNode, :)- estPose(1:2));
+            differencePrevious = norm(obj.path(obj.previousNode, :) - estPose(1:2));
+            if(differenceCurrent < 0.1)
+                if(obj.currentNode < length(obj.path))
+                    obj.currentNode = obj.currentNode + 1;
+                    obj.previousNode = obj.previousNode + 1;
+                end
+            end
+
+            vec = obj.path(obj.currentNode, :) - estPose(1:2);
+            theta_des = atan2(vec(2),vec(1)); % desired orientation
+            omega = angdiff(estPose(3),theta_des); % Compute steering angle
+
+
+            v_f = setSpeed(obj, omega, differencePrevious, differenceCurrent);
+            [omega, v_f] = checkRanges(obj, ranges, omega, v_f);
+        end
+        
+        % Function that checks the ranges and adjusts omega and v_f
+        % appropriately
+        %Suppressed warning for obj because it was not used
+        function [omega, v_f] = checkRanges(obj, ranges, omega, v_f) %#ok<INUSL>
+            for i = 1:length(ranges)
+                if(ranges(i) < 0.2)
+                    v_f = 0.1;
+                    if(i > 13)
+                        omega = -0.8;
+                    elseif(i < 8)
+                        omega = 0.8;
+                    elseif(i == 9 || i == 10) 
+                        omega = -pi/3;
+                    elseif(i == 11 || i == 12)
+                        omega = pi/3;
+                    end
+                    return
+                end
+            end
+        end
+        
+         % This function looks at the distance between the previous and
+        % current nodes and slows the vehicle down so that it does not
+        % veer off course.
+        %Suppressed warning on obj because it was not used
+        function [v_f] = setSpeed(obj, omega, differencePrevious, differenceCurrent) %#ok<INUSL>
+            if(differenceCurrent < 0.5 || differencePrevious < 0.5 || omega > 0.5)
+                v_f = 0.1;
+            else
+                v_f = 0.3;
+            end
+        end
+        
+    end
+    
+end

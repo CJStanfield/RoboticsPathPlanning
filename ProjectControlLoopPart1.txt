@@ -1,0 +1,149 @@
+% ProjectControlLoopPart1 class template for your path and motion planning
+% algorithm
+%
+% Create a "controller" object capable of creating a sequence of waypoints
+% to reach the goal and a motion controller to follow the path. 
+%
+% Note that when the robot collides with the environment in the simulator, 
+% it just stops. Use the range finder to check and avoid collisions.
+%
+% Right now the class sets the goal as the only waypoint and uses a control
+% to point algorithm to drive the robot to the goal without checking for 
+% obstacles.
+%
+% Existing properties (you are free to add/remove properties)
+%       goal : 2D column vector with the goal coordinates
+%       motionControl : in case you would like to use an existing Matlab 
+%           controller like robotics.PurePursuit for differential drive
+%           robots
+%
+% Constructor (Do not modify)
+%		obj = ProjectControlLoopPartI(map,goal,robot);
+%
+% Inputs:
+%       map - a robotics.BinaryOccupancyGrid object
+%       goal - 2D column vector with the goal coordinates
+%       robot - a DiffDriveRobotSimulator object in case you would like to
+%               access robot characteristics, e.g., maximum linear or
+%               angular velocity, etc
+%
+% Existing methods
+%
+%		compute : Given a pose of the robot, it returns the forward 
+%           and angular velocities. Usage:
+%					[v_f, omega] = obj.compute(pose,ranges,angles);
+%			Inputs:
+%	            pose - a 3D column vector containing the pose [x,y,theta] 
+%				    of the robot (accurate global position information)
+%               ranges - the measurements of a range measurement sensor,
+%                   e.g. lidar, kinect, etc. If the no obstacle is detected
+%                   within the measurement range, then the value for the
+%                   specific beam is NaN. You can use the function isnan to
+%                   detect such measurements in the range finder.
+%				angles - the angle which corresponds to each range 
+%					measurement
+%			Outputs:
+%			  v_f - forward velocity
+%			  omega - angular velocity
+%
+% You are allowed to add new methods, but the interface of the compute
+% method must not be changed.
+% 
+% See also: robotics.PurePursuit, robotics.PRM
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Cole Stanfield 1208803696
+% Points will be subtracted for programming style if no name & ID
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+classdef ProjectControlLoopPart1 < handle
+    
+    properties
+        goal = [];
+        motionControl = [];
+        prm = [];
+        path = [];
+        currentNode = 2;
+        previousNode = 1;
+    end
+
+    methods
+        
+        function obj = ProjectControlLoopPart1(map,goal,robot)
+            
+            % some basic sanity checks
+            assert(isa(map,'robotics.BinaryOccupancyGrid'), ' the map must be a robotics.BinaryOccupancyGrid object')
+            assert(size(goal,1)==1 && size(goal,2)==2, ' the goal is not a 2D column vector')
+            assert(isa(robot,'DiffDriveRobotSimulator'), ' robot must be a DiffDriveRobotSimulator object')
+            
+            
+            
+            obj.goal = goal;
+            %Create a PRM
+            obj.prm = robotics.PRM(map, 250);
+            startLocation = robot.Robot.Pose(1:2);
+            obj.path = findpath(obj.prm, startLocation, obj.goal);
+            %show(obj.prm)   
+        end
+        
+        %Suppressed angles warning because the variable was not used
+        function [v_f, omega] = compute(obj,pose,ranges,angles) %#ok<INUSD>
+            %Checks to make sure that the index of the path does not go out of bounds.
+            %In addition, moves destination of the robot to the next node
+            %in the path
+            % Used for testing 
+            differenceCurrent = norm(obj.path(obj.currentNode, :)- pose(1:2));
+            differencePrevious = norm(obj.path(obj.previousNode, :) - pose(1:2));
+            
+            if(differenceCurrent < 0.1)
+                if(obj.currentNode < length(obj.path))
+                    obj.currentNode = obj.currentNode + 1;
+                    obj.previousNode = obj.previousNode + 1;
+                end
+            end
+            
+            vec = obj.path(obj.currentNode, :)- pose(1:2);
+            theta_des = atan2(vec(2),vec(1)); % desired orientation
+            omega = angdiff(pose(3),theta_des); % Compute steering angle
+
+            v_f = setSpeed(obj, omega, vec, differencePrevious, differenceCurrent);
+            
+            % Check the ranges to make sure the robot does not hit a wall.
+            [omega, v_f] = checkRanges(obj, ranges, omega, v_f);
+        end
+        
+        % This function determines if the robot will collide with the wall
+        % and makes adjustments to the speed and steering angle to avoid a
+        % collision.
+        %Suppressed warning on obj because it was not used
+        function [omega, v_f] = checkRanges(obj, ranges, omega, v_f) %#ok<*INUSL>
+            for i = 1:length(ranges)
+                if(ranges(i) < 0.3)
+                    v_f = 0.2;
+                    if(i > 11)
+                        omega = omega - 0.5;
+                    else
+                        omega = omega + 0.5;
+                    end
+                    return
+                end
+            end
+        end
+        
+        % This function looks at the distance between the previous and
+        % current nodes and slows the vehicle down so that it does not
+        % veer off course.
+        function [v_f] = setSpeed(obj, omega, vec, differencePrevious, differenceCurrent)
+            if(differenceCurrent < 0.3)
+                v_f = differenceCurrent/10 * norm(vec) + 0.1;
+            elseif (differencePrevious < 0.3)
+                v_f = differencePrevious/10 * norm(vec) + 0.1;
+            else
+                v_f = (1-abs(omega/pi)) * norm(vec) + 0.1;
+            end
+        end
+        
+    end
+    
+end
